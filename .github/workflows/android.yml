@@ -1,0 +1,89 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解压源码
+        id: source
+        run: |
+          python3 - <<'PY'
+          import os
+          import stat
+          import zipfile
+          from pathlib import Path
+
+          archive = Path("Donezo-Android-Source.zip")
+          if not archive.exists():
+              raise SystemExit("请先把 Donezo-Android-Source.zip 上传到仓库根目录")
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "donezo-source"
+          output.mkdir(parents=True, exist_ok=True)
+          output = output.resolve()
+
+          with zipfile.ZipFile(archive) as z:
+              entries = z.infolist()
+              if sum(e.file_size for e in entries) > 128 * 1024 * 1024:
+                  raise SystemExit("压缩包过大")
+              for entry in entries:
+                  target = (output / entry.filename).resolve()
+                  if not target.is_relative_to(output):
+                      raise SystemExit("压缩包路径不安全")
+                  if stat.S_ISLNK(entry.external_attr >> 16):
+                      raise SystemExit("不支持符号链接")
+              z.extractall(output)
+
+          projects = [
+              p.parent for p in output.rglob("settings.gradle")
+              if (p.parent / "app/src/main/AndroidManifest.xml").is_file()
+          ]
+          if len(projects) != 1:
+              raise SystemExit("没有找到唯一的安卓工程")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"dir={projects[0]}\n")
+          PY
+
+      - name: 配置 Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 配置 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装编译工具
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: 检查工程
+        working-directory: ${{ steps.source.outputs.dir }}
+        run: python3 tools/check_source.py
+
+      - name: 编译 APK
+        working-directory: ${{ steps.source.outputs.dir }}
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: 保存 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Donezo-Study-APK
+          path: ${{ steps.source.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
